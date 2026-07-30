@@ -96,9 +96,10 @@ def make_handler(state: FakeState):
 # ---------------------------------------------------------------------------
 
 def make_offer(offer_id, title="Data Analyst", company="ACME",
-               city="Berlin", country="Allemagne", duration="12 mois"):
+               city="Berlin", country="Allemagne", duration="12 mois",
+               creation_date=None):
     """Cree une offre brute au format API (noms de champs "reels")."""
-    return {
+    offer = {
         "id": offer_id,
         "missionTitle": title,
         "organizationName": company,
@@ -106,6 +107,9 @@ def make_offer(offer_id, title="Data Analyst", company="ACME",
         "countryName": country,
         "duration": duration,
     }
+    if creation_date is not None:
+        offer["creationDate"] = creation_date
+    return offer
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +274,42 @@ class VieBotE2E(unittest.TestCase):
         vie_bot.KEYWORDS = ["data"]
         posted = vie_bot.run(latest=10)
         self.assertEqual(posted, 2)  # seules les 2 offres "Data"
+
+    # --- Test 10 : rattrapage (catchup) ignore le plafond MAX_NOTIFS ------
+    def test_catchup_sans_plafond(self):
+        vie_bot.MAX_NOTIFS = 3  # plafond bas volontaire
+        self.state.offers_response = [make_offer(i) for i in range(1, 11)]  # 10
+        posted = vie_bot.run(catchup=True)
+        self.assertEqual(posted, 10)  # les 10, malgre le plafond de 3
+        self.assertEqual(len(self.state.webhook_payloads), 10)
+
+    # --- Test 11 : filtre --days ne garde que les offres recentes ---------
+    def test_days_filtre_par_date(self):
+        from datetime import date, timedelta
+        recent = date.today().isoformat()
+        vieux = (date.today() - timedelta(days=40)).isoformat()
+        self.state.offers_response = [
+            make_offer(1, title="Recente", creation_date=recent),
+            make_offer(2, title="Vieille", creation_date=vieux),
+        ]
+        posted = vie_bot.run(days=7)
+        self.assertEqual(posted, 1)  # seule la recente
+        self.assertEqual(self.state.webhook_payloads[0]["embeds"][0]["title"],
+                         "Recente")
+        # Mais l'offre vieille reste memorisee (ne reviendra pas).
+        seen = json.loads(self.seen_path.read_text(encoding="utf-8"))["seen"]
+        self.assertEqual(set(seen), {"1", "2"})
+
+    # --- Test 12 : la date de publication apparait dans l'embed -----------
+    def test_embed_contient_date(self):
+        self.state.offers_response = [
+            make_offer(1, creation_date="2026-07-30T14:56:46Z")
+        ]
+        vie_bot.run()
+        fields = self.state.webhook_payloads[0]["embeds"][0]["fields"]
+        noms = {f["name"]: f["value"] for f in fields}
+        self.assertIn("Publiee le", noms)
+        self.assertEqual(noms["Publiee le"], "30/07/2026")
 
 
 if __name__ == "__main__":

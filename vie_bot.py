@@ -23,6 +23,7 @@ import json
 import os
 import sys
 import time
+from datetime import date, timedelta
 from pathlib import Path
 
 import requests
@@ -208,6 +209,9 @@ def normalize(offer: dict) -> dict:
     country = pick(offer, "countryName", "country", "pays", default="")
     # L'API renvoie missionDuration = un entier (nombre de mois), ex. 12.
     duration = pick(offer, "missionDuration", "duration", "duree", default="")
+    # Date de creation, ex. "2026-07-30T14:56:46Z" -> on garde "2026-07-30".
+    date = pick(offer, "creationDate", "startBroadcastDate", "dateCreation",
+                default="")
 
     return {
         "id": str(offer_id) if offer_id is not None else None,
@@ -216,6 +220,7 @@ def normalize(offer: dict) -> dict:
         "city": str(city),
         "country": str(country),
         "duration": _format_duration(duration),
+        "date": str(date)[:10],  # YYYY-MM-DD (chaine vide si absente)
         # URL reelle d'une offre : /offres/{id} (verifie sur le site).
         "url": f"{SITE}/offres/{offer_id}" if offer_id is not None else SITE,
     }
@@ -231,6 +236,21 @@ def _id_sort_key(offer_id: str) -> int:
         return int(offer_id)
     except (ValueError, TypeError):
         return 0
+
+
+def _recent_enough(date_str: str, days: int) -> bool:
+    """Vrai si la date "YYYY-MM-DD" est dans les N derniers jours.
+
+    Si la date est absente ou illisible, on renvoie True (on prefere garder une
+    offre douteuse plutot que de la perdre par erreur de date).
+    """
+    if not date_str:
+        return True
+    try:
+        d = date.fromisoformat(date_str)
+    except ValueError:
+        return True
+    return d >= date.today() - timedelta(days=days)
 
 
 def _format_duration(value) -> str:
@@ -267,12 +287,25 @@ def build_embed(offer: dict) -> dict:
         fields.append(
             {"name": "Duree", "value": offer["duration"], "inline": True}
         )
+    if offer.get("date"):
+        fields.append(
+            {"name": "Publiee le", "value": _date_fr(offer["date"]),
+             "inline": True}
+        )
     return {
         "title": offer["title"][:256],  # Discord limite le titre a 256 chars.
         "url": offer["url"],
         "color": 0x1B6CA8,
         "fields": fields,
     }
+
+
+def _date_fr(date_str: str) -> str:
+    """Convertit 'YYYY-MM-DD' en 'JJ/MM/AAAA' (plus lisible). Sinon, tel quel."""
+    try:
+        return date.fromisoformat(date_str).strftime("%d/%m/%Y")
+    except ValueError:
+        return date_str
 
 
 def send_discord(offer: dict) -> None:
@@ -311,17 +344,24 @@ def send_discord(offer: dict) -> None:
 # LOGIQUE PRINCIPALE
 # ---------------------------------------------------------------------------
 
-def run(init: bool = False, debug: bool = False, latest: int = 0) -> int:
+def run(init: bool = False, debug: bool = False, latest: int = 0,
+        catchup: bool = False, days: int = 0) -> int:
     """Execute un cycle complet. Retourne le nombre de messages envoyes.
 
     Modes :
-      - normal        : ne poste QUE les nouvelles offres (compare a seen.json).
-      - init=True     : memorise tout sans rien poster (1er lancement).
-      - debug=True    : affiche le JSON brut de l'API et s'arrete.
-      - latest=N (>0) : poste les N offres les plus RECENTES, tout de suite, SANS
-                        toucher a seen.json. C'est le mode "a la demande" : utile
-                        pour voir des offres quand on veut, sans perturber le
-                        suivi automatique.
+      - normal         : ne poste QUE les nouvelles offres (compare a seen.json),
+                         plafonne a MAX_NOTIFS par run.
+      - init=True      : memorise tout sans rien poster (1er lancement).
+      - debug=True     : affiche le JSON brut de l'API et s'arrete.
+      - latest=N (>0)  : poste les N offres les plus RECENTES tout de suite, SANS
+                         toucher a seen.json (mode "a la demande").
+      - catchup=True   : RATTRAPAGE. Poste TOUTES les offres pas encore vues (pas
+                         de plafond), et les memorise. Sert a recuperer ce que le
+                         bot automatique aurait rate (panne, PC eteint...). Ne
+                         renvoie jamais une offre deja stockee.
+      - days=N (>0)    : filtre optionnel : ne garder que les offres des N
+                         derniers jours (par date de creation). Se combine avec
+                         le mode normal ou catchup.
     """
     raw = fetch_offers()
 
@@ -382,12 +422,20 @@ def run(init: bool = False, debug: bool = False, latest: int = 0) -> int:
     # Parmi les nouvelles, on ne notifie que celles qui passent KEYWORDS.
     to_notify = [o for o in new_offers if matches_keywords(o)]
 
+    # Filtre date optionnel : on ne garde que les offres des N derniers jours.
+    # (Les offres plus anciennes restent memorisees : on ne les reverra pas.)
+    if days > 0:
+        to_notify = [o for o in to_notify if _recent_enough(o["date"], days)]
+
+    # En mode rattrapage, pas de plafond : on veut TOUT recuperer.
+    plafond = None if catchup else MAX_NOTIFS
+
     sent = 0
     if not WEBHOOK_URL and to_notify:
         print("ATTENTION : DISCORD_WEBHOOK_URL non defini, pas d'envoi.")
     else:
         for o in to_notify:
-            if sent >= MAX_NOTIFS:
+            if plafond is not None and sent >= plafond:
                 print(f"MAX_NOTIFS ({MAX_NOTIFS}) atteint, on s'arrete pour ce run.")
                 break
             send_discord(o)
@@ -418,10 +466,21 @@ def main(argv=None) -> int:
         help="Poste tout de suite les N offres les plus recentes, sans toucher "
              "a seen.json (mode 'a la demande').",
     )
+    parser.add_argument(
+        "--catchup", action="store_true",
+        help="Rattrapage : poste TOUTES les offres pas encore vues (sans "
+             "plafond) et les memorise. Recupere ce que le bot aurait rate.",
+    )
+    parser.add_argument(
+        "--days", type=int, metavar="N", default=0,
+        help="Ne garder que les offres des N derniers jours (filtre optionnel, "
+             "se combine avec le mode normal ou --catchup).",
+    )
     args = parser.parse_args(argv)
 
     try:
-        run(init=args.init, debug=args.debug, latest=args.latest)
+        run(init=args.init, debug=args.debug, latest=args.latest,
+            catchup=args.catchup, days=args.days)
     except requests.RequestException as exc:
         # Erreur reseau/API : on log et on sort en erreur pour que le job
         # Actions apparaisse en rouge, mais sans traceback illisible.
