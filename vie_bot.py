@@ -311,8 +311,18 @@ def send_discord(offer: dict) -> None:
 # LOGIQUE PRINCIPALE
 # ---------------------------------------------------------------------------
 
-def run(init: bool = False, debug: bool = False) -> int:
-    """Execute un cycle complet. Retourne le nombre de messages envoyes."""
+def run(init: bool = False, debug: bool = False, latest: int = 0) -> int:
+    """Execute un cycle complet. Retourne le nombre de messages envoyes.
+
+    Modes :
+      - normal        : ne poste QUE les nouvelles offres (compare a seen.json).
+      - init=True     : memorise tout sans rien poster (1er lancement).
+      - debug=True    : affiche le JSON brut de l'API et s'arrete.
+      - latest=N (>0) : poste les N offres les plus RECENTES, tout de suite, SANS
+                        toucher a seen.json. C'est le mode "a la demande" : utile
+                        pour voir des offres quand on veut, sans perturber le
+                        suivi automatique.
+    """
     raw = fetch_offers()
 
     if debug:
@@ -335,6 +345,20 @@ def run(init: bool = False, debug: bool = False) -> int:
     # Utile pour MAX_NOTIFS : si beaucoup de nouveautes d'un coup, on notifie
     # bien les PLUS RECENTES, pas 15 offres au hasard.
     offers.sort(key=lambda o: _id_sort_key(o["id"]), reverse=True)
+
+    # Mode "a la demande" : on poste les N plus recentes et on s'arrete. On NE
+    # touche PAS a seen.json (le suivi automatique n'est donc pas perturbe).
+    if latest > 0:
+        choix = [o for o in offers if matches_keywords(o)][:latest]
+        if not WEBHOOK_URL:
+            print("ATTENTION : DISCORD_WEBHOOK_URL non defini, pas d'envoi.")
+            return 0
+        for o in choix:
+            send_discord(o)
+            print(f"  envoye : {o['title']} ({o['company']})")
+        print(f"--latest {latest} : {len(choix)} offres postees "
+              f"(seen.json inchange).")
+        return len(choix)
 
     seen = load_seen()
     # Nouvelles = jamais vues, tous filtres confondus.
@@ -389,10 +413,15 @@ def main(argv=None) -> int:
         "--debug", action="store_true",
         help="Affiche le JSON brut et les cles de l'API, puis quitte.",
     )
+    parser.add_argument(
+        "--latest", type=int, metavar="N", default=0,
+        help="Poste tout de suite les N offres les plus recentes, sans toucher "
+             "a seen.json (mode 'a la demande').",
+    )
     args = parser.parse_args(argv)
 
     try:
-        run(init=args.init, debug=args.debug)
+        run(init=args.init, debug=args.debug, latest=args.latest)
     except requests.RequestException as exc:
         # Erreur reseau/API : on log et on sort en erreur pour que le job
         # Actions apparaisse en rouge, mais sans traceback illisible.

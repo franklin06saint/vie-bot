@@ -246,6 +246,31 @@ class VieBotE2E(unittest.TestCase):
         sent = vie_bot.run()
         self.assertEqual(sent, 1)
 
+    # --- Test 8 : mode --latest N (a la demande, seen.json intact) ---------
+    def test_latest_a_la_demande(self):
+        # 5 offres dispo, on en demande 3 : on doit en poster 3 (les plus
+        # recentes = ids les plus grands) SANS toucher a seen.json.
+        self.state.offers_response = [make_offer(i) for i in (1, 2, 3, 4, 5)]
+        posted = vie_bot.run(latest=3)
+        self.assertEqual(posted, 3)
+        self.assertEqual(len(self.state.webhook_payloads), 3)
+        titles_ids = [p["embeds"][0]["url"] for p in self.state.webhook_payloads]
+        # Les 3 plus recentes sont les ids 5, 4, 3.
+        self.assertTrue(all(str(i) in "".join(titles_ids) for i in (5, 4, 3)))
+        # seen.json ne doit PAS avoir ete cree/modifie par ce mode.
+        self.assertFalse(self.seen_path.exists())
+
+    # --- Test 9 : --latest respecte quand meme KEYWORDS -------------------
+    def test_latest_avec_keywords(self):
+        self.state.offers_response = [
+            make_offer(1, title="Data Analyst"),
+            make_offer(2, title="Commercial"),
+            make_offer(3, title="Data Engineer"),
+        ]
+        vie_bot.KEYWORDS = ["data"]
+        posted = vie_bot.run(latest=10)
+        self.assertEqual(posted, 2)  # seules les 2 offres "Data"
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
