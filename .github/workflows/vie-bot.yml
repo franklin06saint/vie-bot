@@ -1,0 +1,53 @@
+name: vie-bot
+
+# Surveille les offres VIE et notifie Discord, toutes les 30 minutes.
+on:
+  schedule:
+    # Cron GitHub Actions (UTC). "*/30 * * * *" = toutes les 30 min.
+    - cron: "*/30 * * * *"
+  # Permet aussi un declenchement manuel depuis l'onglet Actions.
+  workflow_dispatch:
+
+# Indispensable : sans "contents: write", le job ne peut pas committer
+# seen.json, et l'etat serait perdu a chaque run (donc re-notifications).
+permissions:
+  contents: write
+
+# Un seul run a la fois : evite deux jobs qui committent seen.json en parallele.
+concurrency:
+  group: vie-bot
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout du depot
+        uses: actions/checkout@v4
+
+      - name: Installer Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installer la dependance
+        run: pip install requests
+
+      - name: Lancer le bot
+        env:
+          # Secret a definir dans : Settings > Secrets and variables > Actions.
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python vie_bot.py
+
+      - name: Committer seen.json si modifie
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # On ne committe que si seen.json a reellement change.
+          if ! git diff --quiet -- seen.json; then
+            git add seen.json
+            git commit -m "chore: maj seen.json [skip ci]"
+            git push
+          else
+            echo "seen.json inchange, rien a committer."
+          fi

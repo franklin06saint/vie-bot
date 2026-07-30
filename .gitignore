@@ -1,0 +1,6 @@
+# Fichiers temporaires Python
+__pycache__/
+*.pyc
+
+# Secrets locaux : ne JAMAIS committer le webhook Discord
+.env
