@@ -1,5 +1,6 @@
 name: vie-bot
 
+# Bot d'alerte VIE -> Discord.
 # Surveille les offres VIE et notifie Discord, toutes les 30 minutes.
 on:
   schedule:
