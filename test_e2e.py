@@ -311,6 +311,32 @@ class VieBotE2E(unittest.TestCase):
         self.assertIn("Publiee le", noms)
         self.assertEqual(noms["Publiee le"], "30/07/2026")
 
+    # --- Test 13 : recherche par mot (titre/entreprise/lieu) --------------
+    def test_search_par_mot(self):
+        self.state.offers_response = [
+            make_offer(1, title="Data Analyst", country="Allemagne"),
+            make_offer(2, title="Commercial", country="Canada"),
+            make_offer(3, title="Ingenieur", company="DATATECH"),
+        ]
+        # "data" doit matcher l'offre 1 (titre) et l'offre 3 (entreprise).
+        posted = vie_bot.run(search="data")
+        self.assertEqual(posted, 2)
+        # Recherche sur le pays.
+        self.state.webhook_payloads.clear()
+        posted = vie_bot.run(search="canada")
+        self.assertEqual(posted, 1)
+        # seen.json ne doit pas exister (recherche = sans memoire).
+        self.assertFalse(self.seen_path.exists())
+
+    # --- Test 14 : recherche plafonnee a MAX_SEARCH -----------------------
+    def test_search_plafond(self):
+        vie_bot.MAX_SEARCH = 3
+        self.state.offers_response = [
+            make_offer(i, title="Data") for i in range(1, 8)  # 7 offres "Data"
+        ]
+        posted = vie_bot.run(search="data")
+        self.assertEqual(posted, 3)  # plafonne a 3
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

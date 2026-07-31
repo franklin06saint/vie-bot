@@ -58,6 +58,11 @@ MAX_SEEN = 2000
 # salon avec 300 offres d'un coup.
 MAX_NOTIFS = 15
 
+# Nombre max de resultats postes par une recherche (--search). Une recherche
+# large (ex. "data") peut matcher beaucoup d'offres : on plafonne pour ne pas
+# noyer le salon.
+MAX_SEARCH = 25
+
 # Filtre local optionnel sur le titre de l'offre. Liste vide = aucun filtre
 # (toutes les offres passent). Sinon on ne notifie que si un des mots (en
 # minuscules) apparait dans le titre.
@@ -155,16 +160,18 @@ def save_seen(seen: set[str]) -> None:
 # API VIE
 # ---------------------------------------------------------------------------
 
-def fetch_offers() -> list[dict]:
+def fetch_offers(skip: int = 0) -> list[dict]:
     """Interroge l'API et retourne une liste d'offres brutes (dicts).
 
-    La reponse peut avoir deux formes selon l'API :
+    'skip' permet la pagination (0 = premier lot). La reponse peut avoir deux
+    formes selon l'API :
       - directement une liste [ {...}, {...} ]
       - un objet { "count": N, "result": [ {...} ] }
     On gere les deux.
     """
+    payload = dict(PAYLOAD, skip=skip)
     resp = requests.post(
-        API_URL, json=PAYLOAD, headers=HEADERS, timeout=HTTP_TIMEOUT
+        API_URL, json=payload, headers=HEADERS, timeout=HTTP_TIMEOUT
     )
     resp.raise_for_status()
     data = resp.json()
@@ -179,6 +186,31 @@ def fetch_offers() -> list[dict]:
                 return value
     # Forme inattendue : on renvoie une liste vide, le run ne notifie rien.
     return []
+
+
+def fetch_all_offers(max_pages: int = 15) -> list[dict]:
+    """Recupere TOUTES les offres en paginant (pour la recherche).
+
+    On avance par lots (skip += limit) jusqu'a ce que l'API ne renvoie plus
+    rien, ou qu'on atteigne max_pages (garde-fou anti-boucle infinie). On
+    deduplique par id car l'ordre de l'API n'est pas garanti.
+    """
+    step = PAYLOAD.get("limit", 100)
+    vus, tout = set(), []
+    for page in range(max_pages):
+        lot = fetch_offers(skip=page * step)
+        if not lot:
+            break
+        nouveaux = 0
+        for o in lot:
+            oid = o.get("id")
+            if oid not in vus:
+                vus.add(oid)
+                tout.append(o)
+                nouveaux += 1
+        if nouveaux == 0:  # plus rien de neuf -> on arrete
+            break
+    return tout
 
 
 def pick(offer: dict, *names, default=None):
@@ -344,8 +376,41 @@ def send_discord(offer: dict) -> None:
 # LOGIQUE PRINCIPALE
 # ---------------------------------------------------------------------------
 
+def _run_search(term: str) -> int:
+    """Recherche : poste toutes les offres contenant 'term'. Voir run(search=)."""
+    term_low = term.strip().lower()
+    offers = [o for o in (normalize(r) for r in fetch_all_offers())
+              if o["id"] is not None]
+
+    def matche(o):
+        # On cherche le mot dans plusieurs champs, sans tenir compte de la casse.
+        blob = " ".join((o["title"], o["company"], o["city"],
+                         o["country"])).lower()
+        return term_low in blob
+
+    trouves = [o for o in offers if matche(o)]
+    trouves.sort(key=lambda o: _id_sort_key(o["id"]), reverse=True)
+
+    print(f"Recherche '{term}' : {len(trouves)} offre(s) trouvee(s) "
+          f"sur {len(offers)} au total.")
+    if not WEBHOOK_URL:
+        print("ATTENTION : DISCORD_WEBHOOK_URL non defini, pas d'envoi.")
+        return 0
+
+    a_poster = trouves[:MAX_SEARCH]
+    for o in a_poster:
+        send_discord(o)
+        print(f"  envoye : {o['title']} ({o['company']})")
+    if len(trouves) > MAX_SEARCH:
+        print(f"  ({len(trouves) - MAX_SEARCH} autres non postees, "
+              f"affine ta recherche pour en voir moins.)")
+    print(f"Recherche terminee : {len(a_poster)} offres postees "
+          f"(seen.json inchange).")
+    return len(a_poster)
+
+
 def run(init: bool = False, debug: bool = False, latest: int = 0,
-        catchup: bool = False, days: int = 0) -> int:
+        catchup: bool = False, days: int = 0, search: str = "") -> int:
     """Execute un cycle complet. Retourne le nombre de messages envoyes.
 
     Modes :
@@ -362,7 +427,15 @@ def run(init: bool = False, debug: bool = False, latest: int = 0,
       - days=N (>0)    : filtre optionnel : ne garder que les offres des N
                          derniers jours (par date de creation). Se combine avec
                          le mode normal ou catchup.
+      - search="mot"   : RECHERCHE. Fouille TOUTES les offres et poste celles qui
+                         contiennent "mot" (titre, entreprise, ville, pays). Ne
+                         touche PAS a seen.json. Plafonne a MAX_SEARCH.
     """
+    # La recherche fouille TOUTES les offres (pagination), les autres modes se
+    # contentent du premier lot (les plus recentes suffisent).
+    if search:
+        return _run_search(search)
+
     raw = fetch_offers()
 
     if debug:
@@ -476,11 +549,16 @@ def main(argv=None) -> int:
         help="Ne garder que les offres des N derniers jours (filtre optionnel, "
              "se combine avec le mode normal ou --catchup).",
     )
+    parser.add_argument(
+        "--search", metavar="MOT", default="",
+        help="Recherche : poste toutes les offres contenant MOT (titre, "
+             "entreprise, ville, pays). Ne touche pas a seen.json.",
+    )
     args = parser.parse_args(argv)
 
     try:
         run(init=args.init, debug=args.debug, latest=args.latest,
-            catchup=args.catchup, days=args.days)
+            catchup=args.catchup, days=args.days, search=args.search)
     except requests.RequestException as exc:
         # Erreur reseau/API : on log et on sort en erreur pour que le job
         # Actions apparaisse en rouge, mais sans traceback illisible.
