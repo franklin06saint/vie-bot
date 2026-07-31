@@ -23,6 +23,7 @@ import json
 import os
 import sys
 import time
+import unicodedata
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -244,6 +245,8 @@ def normalize(offer: dict) -> dict:
     # Date de creation, ex. "2026-07-30T14:56:46Z" -> on garde "2026-07-30".
     date = pick(offer, "creationDate", "startBroadcastDate", "dateCreation",
                 default="")
+    # Indemnite mensuelle. L'API renvoie un nombre en euros, ex. 2978.53.
+    indemnite = pick(offer, "indemnite", "indemnity", "allowance", default="")
 
     return {
         "id": str(offer_id) if offer_id is not None else None,
@@ -252,6 +255,7 @@ def normalize(offer: dict) -> dict:
         "city": str(city),
         "country": str(country),
         "duration": _format_duration(duration),
+        "indemnite": _format_indemnite(indemnite),
         "date": str(date)[:10],  # YYYY-MM-DD (chaine vide si absente)
         # URL reelle d'une offre : /offres/{id} (verifie sur le site).
         "url": f"{SITE}/offres/{offer_id}" if offer_id is not None else SITE,
@@ -296,6 +300,65 @@ def _format_duration(value) -> str:
         return str(value)
 
 
+def _format_indemnite(value) -> str:
+    """Met l'indemnite en forme : 2978.53 -> '2 978 EUR/mois'.
+
+    L'API renvoie un montant mensuel en euros (nombre). On arrondit a l'entier
+    (les centimes n'apportent rien pour comparer des offres) et on separe les
+    milliers par une espace, a la francaise. Valeur absente ou nulle -> ''.
+    """
+    if value in (None, "", 0):
+        return ""
+    try:
+        montant = round(float(value))
+    except (ValueError, TypeError):
+        return str(value)
+    if montant <= 0:
+        return ""
+    # Espace fine comme separateur de milliers : "2 978".
+    return f"{montant:,}".replace(",", " ") + " EUR/mois"
+
+
+def _strip_accents(text: str) -> str:
+    """Enleve les accents d'une chaine (pour comparer des noms de pays)."""
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+# Table nom de pays (FR, sans accent, en majuscules) -> drapeau emoji. Couvre
+# les principales destinations VIE. Un pays absent -> globe neutre (voir plus
+# bas). On normalise la cle d'entree (majuscules, sans accent) avant de chercher.
+_COUNTRY_FLAGS = {
+    "ALLEMAGNE": "🇩🇪", "ROYAUME-UNI": "🇬🇧", "ETATS-UNIS": "🇺🇸",
+    "ESPAGNE": "🇪🇸", "ITALIE": "🇮🇹", "BELGIQUE": "🇧🇪", "SUISSE": "🇨🇭",
+    "PAYS-BAS": "🇳🇱", "LUXEMBOURG": "🇱🇺", "IRLANDE": "🇮🇪",
+    "PORTUGAL": "🇵🇹", "AUTRICHE": "🇦🇹", "POLOGNE": "🇵🇱", "SUEDE": "🇸🇪",
+    "DANEMARK": "🇩🇰", "NORVEGE": "🇳🇴", "FINLANDE": "🇫🇮", "GRECE": "🇬🇷",
+    "REPUBLIQUE TCHEQUE": "🇨🇿", "TCHEQUIE": "🇨🇿", "HONGRIE": "🇭🇺",
+    "ROUMANIE": "🇷🇴", "SLOVAQUIE": "🇸🇰", "BULGARIE": "🇧🇬",
+    "CROATIE": "🇭🇷", "SERBIE": "🇷🇸", "UKRAINE": "🇺🇦", "TURQUIE": "🇹🇷",
+    "RUSSIE": "🇷🇺", "CANADA": "🇨🇦", "MEXIQUE": "🇲🇽", "BRESIL": "🇧🇷",
+    "ARGENTINE": "🇦🇷", "CHILI": "🇨🇱", "COLOMBIE": "🇨🇴", "PEROU": "🇵🇪",
+    "CHINE": "🇨🇳", "HONG KONG": "🇭🇰", "SINGAPOUR": "🇸🇬", "JAPON": "🇯🇵",
+    "COREE DU SUD": "🇰🇷", "TAIWAN": "🇹🇼", "INDE": "🇮🇳", "THAILANDE": "🇹🇭",
+    "VIETNAM": "🇻🇳", "INDONESIE": "🇮🇩", "MALAISIE": "🇲🇾",
+    "PHILIPPINES": "🇵🇭", "AUSTRALIE": "🇦🇺", "NOUVELLE-ZELANDE": "🇳🇿",
+    "EMIRATS ARABES UNIS": "🇦🇪", "QATAR": "🇶🇦", "ARABIE SAOUDITE": "🇸🇦",
+    "ISRAEL": "🇮🇱", "MAROC": "🇲🇦", "TUNISIE": "🇹🇳", "ALGERIE": "🇩🇿",
+    "EGYPTE": "🇪🇬", "AFRIQUE DU SUD": "🇿🇦", "NIGERIA": "🇳🇬",
+    "KENYA": "🇰🇪", "SENEGAL": "🇸🇳", "COTE D'IVOIRE": "🇨🇮",
+    "FRANCE": "🇫🇷",
+}
+
+
+def _country_flag(country: str) -> str:
+    """Retourne le drapeau emoji d'un pays, ou un globe si inconnu/absent."""
+    if not country:
+        return ""
+    cle = _strip_accents(country).upper().strip()
+    return _COUNTRY_FLAGS.get(cle, "🌍")
+
+
 def matches_keywords(offer: dict) -> bool:
     """Vrai si l'offre passe le filtre KEYWORDS (ou si aucun filtre defini)."""
     if not KEYWORDS:
@@ -319,13 +382,20 @@ def build_embed(offer: dict) -> dict:
         fields.append(
             {"name": "Duree", "value": offer["duration"], "inline": True}
         )
+    if offer.get("indemnite"):
+        fields.append(
+            {"name": "Indemnite", "value": offer["indemnite"], "inline": True}
+        )
     if offer.get("date"):
         fields.append(
             {"name": "Publiee le", "value": _date_fr(offer["date"]),
              "inline": True}
         )
+    # Drapeau du pays en tete de titre : reperage visuel immediat dans le flux.
+    flag = _country_flag(offer["country"])
+    titre = f"{flag} {offer['title']}".strip() if flag else offer["title"]
     return {
-        "title": offer["title"][:256],  # Discord limite le titre a 256 chars.
+        "title": titre[:256],  # Discord limite le titre a 256 chars.
         "url": offer["url"],
         "color": 0x1B6CA8,
         "fields": fields,

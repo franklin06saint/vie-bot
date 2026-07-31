@@ -196,10 +196,11 @@ class VieBotE2E(unittest.TestCase):
         sent = vie_bot.run()
         # On ne notifie que "Data Engineer" et "Python Developer".
         self.assertEqual(sent, 2)
+        # Le titre est prefixe d'un drapeau pays -> on teste en sous-chaine.
         titles = [p["embeds"][0]["title"] for p in self.state.webhook_payloads]
-        self.assertIn("Data Engineer", titles)
-        self.assertIn("Python Developer", titles)
-        self.assertNotIn("Commercial export", titles)
+        self.assertTrue(any("Data Engineer" in t for t in titles))
+        self.assertTrue(any("Python Developer" in t for t in titles))
+        self.assertFalse(any("Commercial export" in t for t in titles))
 
         # POINT CLE : l'offre ecartee (id 2) doit quand meme etre memorisee,
         # sinon elle reviendrait si on changeait KEYWORDS.
@@ -221,7 +222,8 @@ class VieBotE2E(unittest.TestCase):
         self.assertIn("embeds", payload)
         self.assertIsInstance(payload["embeds"], list)
         embed = payload["embeds"][0]
-        self.assertEqual(embed["title"], "Mission Test")
+        # Le titre peut etre prefixe d'un drapeau pays -> on teste la fin.
+        self.assertTrue(embed["title"].endswith("Mission Test"))
         self.assertTrue(embed["url"].startswith("http"))
         self.assertIsInstance(embed["fields"], list)
         # Chaque field respecte le schema Discord {name, value, inline}.
@@ -294,8 +296,9 @@ class VieBotE2E(unittest.TestCase):
         ]
         posted = vie_bot.run(days=7)
         self.assertEqual(posted, 1)  # seule la recente
-        self.assertEqual(self.state.webhook_payloads[0]["embeds"][0]["title"],
-                         "Recente")
+        self.assertTrue(
+            self.state.webhook_payloads[0]["embeds"][0]["title"].endswith(
+                "Recente"))
         # Mais l'offre vieille reste memorisee (ne reviendra pas).
         seen = json.loads(self.seen_path.read_text(encoding="utf-8"))["seen"]
         self.assertEqual(set(seen), {"1", "2"})
