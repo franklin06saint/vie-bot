@@ -24,8 +24,16 @@ import os
 import sys
 import time
 import unicodedata
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+
+# Fuseau de Paris pour dater le bilan du soir. zoneinfo gere l'heure d'ete/hiver.
+# Secours (offset fixe) si la base de fuseaux manque (rare, surtout hors Linux).
+try:
+    from zoneinfo import ZoneInfo
+    _PARIS_TZ = ZoneInfo("Europe/Paris")
+except Exception:  # pragma: no cover - depend de l'OS
+    _PARIS_TZ = timezone(timedelta(hours=2))
 
 import requests
 
@@ -48,6 +56,14 @@ WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
 # Fichier d'etat. Surchargeable pour les tests (fichier temporaire).
 SEEN_FILE = Path(os.environ.get("VIE_SEEN_FILE", "seen.json"))
+
+# Bilan du soir : petit fichier retenant la derniere date de bilan envoye
+# (format "AAAA-MM-JJ"), pour ne poster qu'un seul bilan par jour. Surchargeable
+# pour les tests.
+DIGEST_FILE = Path(os.environ.get("VIE_DIGEST_FILE", "last_digest.txt"))
+
+# Heure (de Paris) a partir de laquelle on poste le bilan du jour. 21 = 21h.
+DIGEST_HOUR = 21
 
 # Nombre max d'IDs conserves dans seen.json. Au-dela on tronque pour eviter que
 # le fichier gonfle indefiniment. Les offres VIE tournent, les vieux IDs ne
@@ -247,6 +263,10 @@ def normalize(offer: dict) -> dict:
     # Date de creation, ex. "2026-07-30T14:56:46Z" -> on garde "2026-07-30".
     date = pick(offer, "creationDate", "startBroadcastDate", "dateCreation",
                 default="")
+    # Date de MISE EN LIGNE (diffusion). Peut differer de la creation : une offre
+    # creee le 31 peut n'etre visible que le 1er. C'est cette date qui colle au
+    # moment ou l'offre "apparait" -> on l'utilise pour le bilan du jour.
+    bdate = pick(offer, "startBroadcastDate", "creationDate", default="")
     # Indemnite mensuelle. L'API renvoie un nombre en euros, ex. 2978.53.
     indemnite = pick(offer, "indemnite", "indemnity", "allowance", default="")
 
@@ -259,6 +279,7 @@ def normalize(offer: dict) -> dict:
         "duration": _format_duration(duration),
         "indemnite": _format_indemnite(indemnite),
         "date": str(date)[:10],  # YYYY-MM-DD (chaine vide si absente)
+        "bdate": str(bdate)[:10],  # date de mise en ligne (pour le bilan)
         # URL reelle d'une offre : /offres/{id} (verifie sur le site).
         "url": f"{SITE}/offres/{offer_id}" if offer_id is not None else SITE,
     }
@@ -412,15 +433,13 @@ def _date_fr(date_str: str) -> str:
         return date_str
 
 
-def send_discord(offer: dict) -> None:
-    """Envoie un embed Discord. Gere le 429 (rate limit) avec un retry unique.
+def _post_webhook(payload: dict) -> None:
+    """Poste un payload sur le webhook Discord. Gere le 429 (retry unique).
 
     Discord repond 429 avec un champ JSON "retry_after" (secondes) quand on va
     trop vite. On lit ce delai, on attend, et on reessaie UNE fois. Si ca rate
-    encore, on abandonne cette offre sans crasher le run.
+    encore, on abandonne ce message sans crasher le run.
     """
-    payload = {"embeds": [build_embed(offer)]}
-
     for attempt in range(2):  # tentative initiale + 1 retry
         resp = requests.post(
             WEBHOOK_URL, json=payload, headers={"Content-Type": "application/json"},
@@ -437,11 +456,84 @@ def send_discord(offer: dict) -> None:
                 print(f"  429 Discord, attente {retry_after:.1f}s puis retry")
                 time.sleep(retry_after)
                 continue
-            print("  429 Discord encore apres retry, offre ignoree")
+            print("  429 Discord encore apres retry, message ignore")
             return
         # 2xx attendu (204 en general). On leve pour les autres erreurs.
         resp.raise_for_status()
         return
+
+
+def send_discord(offer: dict) -> None:
+    """Envoie l'embed Discord d'une offre."""
+    _post_webhook({"embeds": [build_embed(offer)]})
+
+
+# ---------------------------------------------------------------------------
+# BILAN DU SOIR
+# ---------------------------------------------------------------------------
+
+def _load_last_digest() -> str:
+    """Retourne la date du dernier bilan envoye ('AAAA-MM-JJ'), ou '' si aucun."""
+    try:
+        return DIGEST_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _save_last_digest(jour: str) -> None:
+    """Memorise la date du dernier bilan envoye."""
+    DIGEST_FILE.write_text(jour, encoding="utf-8")
+
+
+def build_digest_embed(offers: list[dict], jour: str) -> dict:
+    """Construit l'embed du bilan quotidien.
+
+    'offers' = toutes les offres vues aujourd'hui (deja paginees), 'jour' = la
+    date du jour au format 'AAAA-MM-JJ'. Comme le bot voit desormais TOUTES les
+    offres, le nombre publie aujourd'hui = le nombre reellement envoye : le bilan
+    certifie donc que rien n'a ete manque.
+    """
+    # "Du jour" = mise en ligne aujourd'hui (bdate), ou a defaut creee aujourd'hui.
+    du_jour = [o for o in offers
+               if o.get("bdate") == jour or o.get("date") == jour]
+    n = len(du_jour)
+    if n:
+        desc = (f"**{n}** offre(s) publiee(s) aujourd'hui, "
+                f"**toutes envoyees** ✅\nBonne soiree et bon courage ! 🚀")
+    else:
+        desc = "Aucune nouvelle offre publiee aujourd'hui. À demain ! 🌙"
+    return {
+        "title": f"📊 Bilan du {_date_fr(jour)}",
+        "description": desc,
+        "color": 0x2ECC71,  # vert : tout est ok
+    }
+
+
+def send_digest(offers: list[dict], jour: str) -> None:
+    """Poste le bilan du jour sur Discord et memorise qu'il a ete envoye."""
+    _post_webhook({"embeds": [build_digest_embed(offers, jour)]})
+    _save_last_digest(jour)
+    print(f"Bilan du {jour} envoye.")
+
+
+def maybe_send_digest(offers: list[dict], force: bool = False) -> bool:
+    """Envoie le bilan si on est apres DIGEST_HOUR (Paris) et pas deja fait.
+
+    Retourne True si un bilan a ete envoye. 'force=True' (mode --digest manuel)
+    ignore l'heure et l'etat, pour tester tout de suite.
+    """
+    now = datetime.now(_PARIS_TZ)
+    jour = now.date().isoformat()
+    if not force:
+        if now.hour < DIGEST_HOUR:
+            return False  # trop tot dans la journee
+        if _load_last_digest() == jour:
+            return False  # bilan du jour deja poste
+    if not WEBHOOK_URL:
+        print("ATTENTION : DISCORD_WEBHOOK_URL non defini, bilan non envoye.")
+        return False
+    send_digest(offers, jour)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +574,8 @@ def _run_search(term: str) -> int:
 
 
 def run(init: bool = False, debug: bool = False, latest: int = 0,
-        catchup: bool = False, days: int = 0, search: str = "") -> int:
+        catchup: bool = False, days: int = 0, search: str = "",
+        digest: bool = False) -> int:
     """Execute un cycle complet. Retourne le nombre de messages envoyes.
 
     Modes :
@@ -535,6 +628,12 @@ def run(init: bool = False, debug: bool = False, latest: int = 0,
     # Utile pour MAX_NOTIFS : si beaucoup de nouveautes d'un coup, on notifie
     # bien les PLUS RECENTES, pas 15 offres au hasard.
     offers.sort(key=lambda o: _id_sort_key(o["id"]), reverse=True)
+
+    # Mode bilan manuel : on poste le bilan du jour tout de suite (ignore l'heure
+    # et l'etat) et on s'arrete. Sert a tester le rendu.
+    if digest:
+        maybe_send_digest(offers, force=True)
+        return 0
 
     # Mode "a la demande" : on poste les N plus recentes et on s'arrete. On NE
     # touche PAS a seen.json (le suivi automatique n'est donc pas perturbe).
@@ -597,6 +696,11 @@ def run(init: bool = False, debug: bool = False, latest: int = 0,
     # ne seront pas renvoyees. (Compromis : anti-spam prime sur l'exhaustivite.)
     save_seen(seen)
 
+    # Bilan du soir : au 1er passage apres DIGEST_HOUR (Paris), on poste le recap
+    # du jour (une seule fois par jour). Pas sur le bouton rattrapage (--catchup).
+    if not catchup:
+        maybe_send_digest(offers)
+
     print(f"Termine : {len(new_offers)} nouvelles offres, {sent} notifications.")
     return sent
 
@@ -631,11 +735,16 @@ def main(argv=None) -> int:
         help="Recherche : poste toutes les offres contenant MOT (titre, "
              "entreprise, ville, pays). Ne touche pas a seen.json.",
     )
+    parser.add_argument(
+        "--digest", action="store_true",
+        help="Poste le bilan du jour tout de suite (test), sans attendre 21h.",
+    )
     args = parser.parse_args(argv)
 
     try:
         run(init=args.init, debug=args.debug, latest=args.latest,
-            catchup=args.catchup, days=args.days, search=args.search)
+            catchup=args.catchup, days=args.days, search=args.search,
+            digest=args.digest)
     except requests.RequestException as exc:
         # Erreur reseau/API : on log et on sort en erreur pour que le job
         # Actions apparaisse en rouge, mais sans traceback illisible.

@@ -40,15 +40,17 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python vie_bot.py
 
-      - name: Committer seen.json si modifie
+      - name: Committer l'etat si modifie
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # On ne committe que si seen.json a reellement change.
-          if ! git diff --quiet -- seen.json; then
-            git add seen.json
-            git commit -m "chore: maj seen.json [skip ci]"
+          # Etat = seen.json (offres vues) + last_digest.txt (date du dernier
+          # bilan). .gitignore protege deja pycache/.env/.bat, donc "git add -A"
+          # est sur. On ne committe que s'il y a vraiment un changement.
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: maj etat [skip ci]"
             git push
           else
-            echo "seen.json inchange, rien a committer."
+            echo "etat inchange, rien a committer."
           fi

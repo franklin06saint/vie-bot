@@ -135,10 +135,17 @@ class VieBotE2E(unittest.TestCase):
         self.seen_path = Path(self.tmp.name)
         self.seen_path.unlink()  # on veut qu'il soit absent au depart
 
+        # Fichier d'etat du bilan, isole aussi (pour ne pas ecrire dans le repo).
+        self.digest_path = Path(self.tmp.name + ".digest")
+
         # On branche vie_bot sur le faux serveur.
         vie_bot.API_URL = base + "/api"
         vie_bot.WEBHOOK_URL = base + "/webhook"
         vie_bot.SEEN_FILE = self.seen_path
+        vie_bot.DIGEST_FILE = self.digest_path
+        # Heure impossible : le bilan ne se declenche jamais tout seul pendant
+        # les tests (sinon un test lance apres 21h posterait un bilan parasite).
+        vie_bot.DIGEST_HOUR = 99
         vie_bot.KEYWORDS = []  # reset entre tests
 
     def tearDown(self):
@@ -146,6 +153,8 @@ class VieBotE2E(unittest.TestCase):
         self.server.server_close()
         if self.seen_path.exists():
             self.seen_path.unlink()
+        if self.digest_path.exists():
+            self.digest_path.unlink()
 
     # --- Test 1 : --init ne notifie pas -----------------------------------
     def test_init_ne_notifie_pas(self):
@@ -339,6 +348,43 @@ class VieBotE2E(unittest.TestCase):
         ]
         posted = vie_bot.run(search="data")
         self.assertEqual(posted, 3)  # plafonne a 3
+
+    # --- Test 15 : le bilan du soir compte les offres du jour -------------
+    def test_digest_compte_offres_du_jour(self):
+        from datetime import datetime
+        aujourdhui = datetime.now(vie_bot._PARIS_TZ).date().isoformat()
+        self.state.offers_response = [
+            make_offer(1, title="Aujourd'hui A", creation_date=aujourdhui),
+            make_offer(2, title="Aujourd'hui B", creation_date=aujourdhui),
+            make_offer(3, title="Vieille", creation_date="2020-01-01"),
+        ]
+        # --digest force l'envoi immediat (ignore l'heure).
+        vie_bot.run(digest=True)
+        self.assertEqual(len(self.state.webhook_payloads), 1)
+        embed = self.state.webhook_payloads[0]["embeds"][0]
+        self.assertIn("Bilan", embed["title"])
+        # 2 offres publiees aujourd'hui doivent etre comptees dans le bilan.
+        self.assertIn("2", embed["description"])
+        # La date du bilan doit avoir ete memorisee.
+        self.assertTrue(self.digest_path.exists())
+
+    # --- Test 16 : un seul bilan par jour ---------------------------------
+    def test_digest_une_fois_par_jour(self):
+        from datetime import datetime
+        aujourdhui = datetime.now(vie_bot._PARIS_TZ).date().isoformat()
+        self.state.offers_response = [make_offer(1, creation_date=aujourdhui)]
+        # Heure atteinte -> le bilan doit partir au 1er run...
+        vie_bot.DIGEST_HOUR = 0
+        vie_bot.run()
+        bilans = [p for p in self.state.webhook_payloads
+                  if "Bilan" in p["embeds"][0].get("title", "")]
+        self.assertEqual(len(bilans), 1)
+        # ...mais pas au run suivant (deja fait aujourd'hui).
+        self.state.webhook_payloads.clear()
+        vie_bot.run()
+        bilans2 = [p for p in self.state.webhook_payloads
+                   if "Bilan" in p["embeds"][0].get("title", "")]
+        self.assertEqual(len(bilans2), 0)
 
 
 if __name__ == "__main__":
