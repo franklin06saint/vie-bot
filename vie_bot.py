@@ -55,9 +55,11 @@ SEEN_FILE = Path(os.environ.get("VIE_SEEN_FILE", "seen.json"))
 MAX_SEEN = 2000
 
 # Garde-fou anti-spam : on n'envoie jamais plus de MAX_NOTIFS messages par run.
-# Utile surtout au premier vrai run si on a oublie --init : on ne floode pas le
-# salon avec 300 offres d'un coup.
-MAX_NOTIFS = 15
+# Le bot voyant desormais TOUTES les offres, un run retarde par GitHub peut
+# cumuler plus de nouveautes : on monte le plafond a 40 (le volume reel est de
+# ~25 offres/jour) pour ne pas perdre d'offres. Au-dela, le bouton de rattrapage
+# (--catchup, sans plafond) recupere le reste.
+MAX_NOTIFS = 40
 
 # Nombre max de resultats postes par une recherche (--search). Une recherche
 # large (ex. "data") peut matcher beaucoup d'offres : on plafonne pour ne pas
@@ -501,15 +503,13 @@ def run(init: bool = False, debug: bool = False, latest: int = 0,
                          contiennent "mot" (titre, entreprise, ville, pays). Ne
                          touche PAS a seen.json. Plafonne a MAX_SEARCH.
     """
-    # La recherche fouille TOUTES les offres (pagination), les autres modes se
-    # contentent du premier lot (les plus recentes suffisent).
+    # La recherche fouille TOUTES les offres (pagination).
     if search:
         return _run_search(search)
 
-    raw = fetch_offers()
-
     if debug:
-        # Mode diagnostic : on montre la forme brute pour caler normalize().
+        # Mode diagnostic : une seule page suffit pour inspecter les cles.
+        raw = fetch_offers()
         print(f"Offres recues : {len(raw)}")
         if raw:
             print("Cles de la premiere offre :")
@@ -517,6 +517,13 @@ def run(init: bool = False, debug: bool = False, latest: int = 0,
             print("JSON brut de la premiere offre :")
             print(json.dumps(raw[0], ensure_ascii=False, indent=2)[:2000])
         return 0
+
+    # IMPORTANT : on pagine TOUTES les offres (pas juste la 1re page de 100).
+    # Verifie le 2026-08-01 : l'API ne trie pas par date, donc une seule page
+    # rate ~26% des offres les plus recentes -> des offres n'etaient detectees
+    # que des jours plus tard (ou jamais). En paginant, aucune offre n'echappe
+    # au bot : toute nouveaute est vue des le passage suivant.
+    raw = fetch_all_offers()
 
     # On normalise et on jette les offres sans id (inexploitables : impossible
     # de savoir si on les a deja vues).
