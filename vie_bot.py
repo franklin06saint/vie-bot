@@ -65,6 +65,10 @@ DIGEST_FILE = Path(os.environ.get("VIE_DIGEST_FILE", "last_digest.txt"))
 # Heure (de Paris) a partir de laquelle on poste le bilan du jour. 21 = 21h.
 DIGEST_HOUR = 21
 
+# Nombre max d'offres listees (nom + lien) dans le bilan du soir. Au-dela, on
+# affiche "... et N autres" pour rester sous la limite Discord (4096 car.).
+MAX_DIGEST_LIST = 40
+
 # Nombre max d'IDs conserves dans seen.json. Au-dela on tronque pour eviter que
 # le fichier gonfle indefiniment. Les offres VIE tournent, les vieux IDs ne
 # reviennent pas, donc 2000 est large.
@@ -496,15 +500,27 @@ def build_digest_embed(offers: list[dict], jour: str) -> dict:
     # "Du jour" = mise en ligne aujourd'hui (bdate), ou a defaut creee aujourd'hui.
     du_jour = [o for o in offers
                if o.get("bdate") == jour or o.get("date") == jour]
+    # Plus recentes en haut (id decroissant).
+    du_jour.sort(key=lambda o: _id_sort_key(o["id"]), reverse=True)
     n = len(du_jour)
-    if n:
-        desc = (f"**{n}** offre(s) publiee(s) aujourd'hui, "
-                f"**toutes envoyees** ✅\nBonne soiree et bon courage ! 🚀")
-    else:
+    if not n:
         desc = "Aucune nouvelle offre publiee aujourd'hui. À demain ! 🌙"
+    else:
+        # Liste "nom cliquable" (avec drapeau), les plus recentes d'abord. On
+        # plafonne pour rester sous la limite Discord (4096 car. de description).
+        lignes = []
+        for o in du_jour[:MAX_DIGEST_LIST]:
+            flag = _country_flag(o["country"])
+            prefixe = f"{flag} " if flag else ""
+            lignes.append(f"- [{prefixe}{o['title']}]({o['url']})")
+        if n > MAX_DIGEST_LIST:
+            lignes.append(f"- … et **{n - MAX_DIGEST_LIST}** autre(s)")
+        entete = (f"**{n}** offre(s) publiee(s) aujourd'hui, "
+                  f"**toutes envoyees** ✅\n\n")
+        desc = entete + "\n".join(lignes)
     return {
         "title": f"📊 Bilan du {_date_fr(jour)}",
-        "description": desc,
+        "description": desc[:4096],  # garde-fou limite Discord
         "color": 0x2ECC71,  # vert : tout est ok
     }
 
