@@ -320,8 +320,8 @@ class VieBotE2E(unittest.TestCase):
         vie_bot.run()
         fields = self.state.webhook_payloads[0]["embeds"][0]["fields"]
         noms = {f["name"]: f["value"] for f in fields}
-        self.assertIn("Publiee le", noms)
-        self.assertEqual(noms["Publiee le"], "30/07/2026")
+        self.assertIn("Mise en ligne le", noms)
+        self.assertEqual(noms["Mise en ligne le"], "30/07/2026")
 
     # --- Test 13 : recherche par mot (titre/entreprise/lieu) --------------
     def test_search_par_mot(self):

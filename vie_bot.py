@@ -271,6 +271,8 @@ def normalize(offer: dict) -> dict:
     # creee le 31 peut n'etre visible que le 1er. C'est cette date qui colle au
     # moment ou l'offre "apparait" -> on l'utilise pour le bilan du jour.
     bdate = pick(offer, "startBroadcastDate", "creationDate", default="")
+    # Date limite = fin de diffusion de l'offre (au-dela, plus candidatable).
+    deadline = pick(offer, "endBroadcastDate", "endDate", default="")
     # Indemnite mensuelle. L'API renvoie un nombre en euros, ex. 2978.53.
     indemnite = pick(offer, "indemnite", "indemnity", "allowance", default="")
 
@@ -284,6 +286,7 @@ def normalize(offer: dict) -> dict:
         "indemnite": _format_indemnite(indemnite),
         "date": str(date)[:10],  # YYYY-MM-DD (chaine vide si absente)
         "bdate": str(bdate)[:10],  # date de mise en ligne (pour le bilan)
+        "deadline": str(deadline)[:10],  # date limite de candidature
         # URL reelle d'une offre : /offres/{id} (verifie sur le site).
         "url": f"{SITE}/offres/{offer_id}" if offer_id is not None else SITE,
     }
@@ -413,14 +416,20 @@ def build_embed(offer: dict) -> dict:
         fields.append(
             {"name": "Indemnite", "value": offer["indemnite"], "inline": True}
         )
-    # "Publiee le" = date de MISE EN LIGNE (bdate), pas la date de creation
+    # "Mise en ligne le" = date de MISE EN LIGNE (bdate), pas la date de creation
     # interne. Une offre creee il y a des mois mais diffusee aujourd'hui est une
     # vraie offre du jour : afficher sa date de creation (ex. 23/02) donnait la
     # fausse impression d'une vieille offre. On montre donc quand elle apparait.
     date_pub = offer.get("bdate") or offer.get("date")
     if date_pub:
         fields.append(
-            {"name": "Publiee le", "value": _date_fr(date_pub),
+            {"name": "Mise en ligne le", "value": _date_fr(date_pub),
+             "inline": True}
+        )
+    # Date limite de candidature (fin de diffusion) : utile pour ne rien rater.
+    if offer.get("deadline"):
+        fields.append(
+            {"name": "Candidature jusqu'au", "value": _date_fr(offer["deadline"]),
              "inline": True}
         )
     # Drapeau du pays en tete de titre : reperage visuel immediat dans le flux.
