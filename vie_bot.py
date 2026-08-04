@@ -413,9 +413,14 @@ def build_embed(offer: dict) -> dict:
         fields.append(
             {"name": "Indemnite", "value": offer["indemnite"], "inline": True}
         )
-    if offer.get("date"):
+    # "Publiee le" = date de MISE EN LIGNE (bdate), pas la date de creation
+    # interne. Une offre creee il y a des mois mais diffusee aujourd'hui est une
+    # vraie offre du jour : afficher sa date de creation (ex. 23/02) donnait la
+    # fausse impression d'une vieille offre. On montre donc quand elle apparait.
+    date_pub = offer.get("bdate") or offer.get("date")
+    if date_pub:
         fields.append(
-            {"name": "Publiee le", "value": _date_fr(offer["date"]),
+            {"name": "Publiee le", "value": _date_fr(date_pub),
              "inline": True}
         )
     # Drapeau du pays en tete de titre : reperage visuel immediat dans le flux.
